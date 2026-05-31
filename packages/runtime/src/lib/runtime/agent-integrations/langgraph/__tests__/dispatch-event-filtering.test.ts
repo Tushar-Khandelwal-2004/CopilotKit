@@ -173,6 +173,108 @@ describe("dispatchEvent emit-tool-calls filtering", () => {
     expect(result).toBe(true);
     expect(events).toHaveLength(1);
   });
+
+  it("passes tool events when copilotkit:emit-tool-calls is an unsupported value", () => {
+    const { agent, events } = createAgent();
+
+    const result = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "tc-1",
+      toolCallName: "search",
+      parentMessageId: "msg-1",
+      rawEvent: { metadata: { "copilotkit:emit-tool-calls": 0 } },
+    } as any);
+
+    expect(result).toBe(true);
+    expect(events).toHaveLength(1);
+  });
+
+  it("suppresses non-matching tool events when copilotkit:emit-tool-calls is a string", () => {
+    const { agent, events } = createAgent();
+
+    const result = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "tc-1",
+      toolCallName: "search",
+      parentMessageId: "msg-1",
+      rawEvent: { metadata: { "copilotkit:emit-tool-calls": "draft_email" } },
+    } as any);
+
+    expect(result).toBe(false);
+    expect(events).toHaveLength(0);
+  });
+
+  it("passes matching tool events when copilotkit:emit-tool-calls is a string", () => {
+    const { agent, events } = createAgent();
+
+    const result = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "tc-1",
+      toolCallName: "draft_email",
+      parentMessageId: "msg-1",
+      rawEvent: { metadata: { "copilotkit:emit-tool-calls": "draft_email" } },
+    } as any);
+
+    expect(result).toBe(true);
+    expect(events).toHaveLength(1);
+  });
+
+  it("uses array emit-tool-calls as a whitelist across args and end events", () => {
+    const { agent, events } = createAgent();
+    const metadata = { "copilotkit:emit-tool-calls": ["draft_email"] };
+
+    const blockedStart = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "tc-blocked",
+      toolCallName: "search",
+      parentMessageId: "msg-1",
+      rawEvent: { metadata },
+    } as any);
+    const blockedArgs = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_ARGS,
+      toolCallId: "tc-blocked",
+      delta: "{}",
+      rawEvent: { metadata },
+    } as any);
+    const blockedEnd = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_END,
+      toolCallId: "tc-blocked",
+      rawEvent: { metadata },
+    } as any);
+
+    expect(blockedStart).toBe(false);
+    expect(blockedArgs).toBe(false);
+    expect(blockedEnd).toBe(false);
+    expect(events).toHaveLength(0);
+
+    const allowedStart = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_START,
+      toolCallId: "tc-allowed",
+      toolCallName: "draft_email",
+      parentMessageId: "msg-1",
+      rawEvent: { metadata },
+    } as any);
+    const allowedArgs = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_ARGS,
+      toolCallId: "tc-allowed",
+      delta: "{}",
+      rawEvent: { metadata },
+    } as any);
+    const allowedEnd = agent.dispatchEvent({
+      type: EventType.TOOL_CALL_END,
+      toolCallId: "tc-allowed",
+      rawEvent: { metadata },
+    } as any);
+
+    expect(allowedStart).toBe(true);
+    expect(allowedArgs).toBe(true);
+    expect(allowedEnd).toBe(true);
+    expect(events.map((event) => event.type)).toEqual([
+      EventType.TOOL_CALL_START,
+      EventType.TOOL_CALL_ARGS,
+      EventType.TOOL_CALL_END,
+    ]);
+  });
 });
 
 // ---------- CopilotKit custom event dispatch ----------

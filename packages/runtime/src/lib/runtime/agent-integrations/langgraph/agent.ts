@@ -36,8 +36,53 @@ import { CustomEventNames } from "./consts";
 export { CustomEventNames };
 
 export class LangGraphAgent extends AGUILangGraphAgent {
+  private emitToolCallDecisions = new Map<string, boolean>();
+
   constructor(config: LangGraphAgentConfig) {
     super(config);
+  }
+
+  private shouldEmitToolCall(
+    emitToolCalls: unknown,
+    toolCallName?: string,
+  ) {
+    if (typeof emitToolCalls === "boolean") {
+      return emitToolCalls;
+    }
+    if (Array.isArray(emitToolCalls)) {
+      return toolCallName ? emitToolCalls.includes(toolCallName) : false;
+    }
+    if (typeof emitToolCalls === "string") {
+      return toolCallName === emitToolCalls;
+    }
+    return true;
+  }
+
+  private shouldEmitToolEvent(
+    emitToolCalls: unknown,
+    event: ToolCallEvents,
+  ) {
+    const toolCallId = event.toolCallId;
+    const toolCallName =
+      "toolCallName" in event ? event.toolCallName : undefined;
+
+    if (event.type === EventType.TOOL_CALL_START) {
+      const shouldEmit = this.shouldEmitToolCall(emitToolCalls, toolCallName);
+      if (toolCallId) {
+        this.emitToolCallDecisions.set(toolCallId, shouldEmit);
+      }
+      return shouldEmit;
+    }
+
+    if (toolCallId && this.emitToolCallDecisions.has(toolCallId)) {
+      const shouldEmit = this.emitToolCallDecisions.get(toolCallId) ?? true;
+      if (event.type === EventType.TOOL_CALL_END) {
+        this.emitToolCallDecisions.delete(toolCallId);
+      }
+      return shouldEmit;
+    }
+
+    return this.shouldEmitToolCall(emitToolCalls, toolCallName);
   }
 
   dispatchEvent(event: ProcessedEvents) {
@@ -131,9 +176,10 @@ export class LangGraphAgent extends AGUILangGraphAgent {
       event.type === EventType.TOOL_CALL_ARGS ||
       event.type === EventType.TOOL_CALL_END;
     if ("copilotkit:emit-tool-calls" in (rawEvent.metadata || {})) {
+      const emitToolCalls = rawEvent.metadata["copilotkit:emit-tool-calls"];
       if (
-        rawEvent.metadata["copilotkit:emit-tool-calls"] === false &&
-        isToolEvent
+        isToolEvent &&
+        !this.shouldEmitToolEvent(emitToolCalls, event as ToolCallEvents)
       ) {
         return false;
       }

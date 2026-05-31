@@ -8,10 +8,13 @@ logger = logging.getLogger(__name__)
 from ag_ui_langgraph import LangGraphAgent
 from ag_ui.core import (
     EventType,
+    AssistantMessage,
     CustomEvent,
+    MessagesSnapshotEvent,
     TextMessageStartEvent,
     TextMessageContentEvent,
     TextMessageEndEvent,
+    ToolMessage,
     ToolCallStartEvent,
     ToolCallArgsEvent,
     ToolCallEndEvent,
@@ -68,6 +71,89 @@ class LangGraphAGUIAgent(LangGraphAgent):
     ):
         super().__init__(name=name, graph=graph, description=description, config=config)
         self.constant_schema_keys = self.constant_schema_keys + ["copilotkit"]
+        self._emit_tool_call_decisions: Dict[str, bool] = {}
+
+    def _should_emit_tool_call(
+        self,
+        emit_tool_calls: Union[bool, str, List[str]],
+        tool_call_name: Optional[str],
+    ) -> bool:
+        if isinstance(emit_tool_calls, bool):
+            return emit_tool_calls
+        if isinstance(emit_tool_calls, str):
+            return tool_call_name == emit_tool_calls
+        if isinstance(emit_tool_calls, list):
+            return tool_call_name in emit_tool_calls
+        return True
+
+    def _should_emit_tool_event(
+        self,
+        emit_tool_calls: Union[bool, str, List[str]],
+        event: ToolCallEvents,
+    ) -> bool:
+        tool_call_id = getattr(event, "tool_call_id", None)
+        tool_call_name = getattr(event, "tool_call_name", None)
+
+        if event.type == EventType.TOOL_CALL_START:
+            should_emit = self._should_emit_tool_call(
+                emit_tool_calls, tool_call_name
+            )
+            if tool_call_id:
+                self._emit_tool_call_decisions[tool_call_id] = should_emit
+            return should_emit
+
+        if tool_call_id and tool_call_id in self._emit_tool_call_decisions:
+            should_emit = self._emit_tool_call_decisions[tool_call_id]
+            if event.type == EventType.TOOL_CALL_END:
+                del self._emit_tool_call_decisions[tool_call_id]
+            return should_emit
+
+        return self._should_emit_tool_call(emit_tool_calls, tool_call_name)
+
+    def _filter_messages_snapshot(
+        self,
+        event: MessagesSnapshotEvent,
+        emit_tool_calls: Union[bool, str, List[str]],
+    ) -> MessagesSnapshotEvent:
+        if emit_tool_calls is True:
+            return event
+
+        allowed_tool_call_ids = set()
+        removed_tool_call_ids = set()
+        messages = []
+
+        for message in event.messages:
+            if isinstance(message, AssistantMessage) and message.tool_calls:
+                tool_calls = []
+                for tool_call in message.tool_calls:
+                    if self._should_emit_tool_call(
+                        emit_tool_calls, tool_call.function.name
+                    ):
+                        tool_calls.append(tool_call)
+                        allowed_tool_call_ids.add(tool_call.id)
+                    else:
+                        removed_tool_call_ids.add(tool_call.id)
+                if len(tool_calls) != len(message.tool_calls):
+                    message = message.model_copy(
+                        update={"tool_calls": tool_calls or None}
+                    )
+
+            if isinstance(message, ToolMessage):
+                if emit_tool_calls is False or (
+                    removed_tool_call_ids
+                    and message.tool_call_id in removed_tool_call_ids
+                ):
+                    continue
+                if not isinstance(emit_tool_calls, bool) and allowed_tool_call_ids:
+                    if message.tool_call_id not in allowed_tool_call_ids:
+                        continue
+
+            messages.append(message)
+
+        if len(messages) == len(event.messages):
+            return event
+
+        return event.model_copy(update={"messages": messages})
 
     def _dispatch_event(self, event) -> str:
         """Override the dispatch event method to handle custom CopilotKit events and filtering.
@@ -235,8 +321,13 @@ class LangGraphAGUIAgent(LangGraphAgent):
             ) or {}
 
             if "copilotkit:emit-tool-calls" in metadata:
-                if metadata["copilotkit:emit-tool-calls"] is False and is_tool_event:
+                emit_tool_calls = metadata["copilotkit:emit-tool-calls"]
+                if is_tool_event and not self._should_emit_tool_event(
+                    emit_tool_calls, event
+                ):
                     return None  # Don't dispatch this event
+                if event.type == EventType.MESSAGES_SNAPSHOT:
+                    event = self._filter_messages_snapshot(event, emit_tool_calls)
 
             if "copilotkit:emit-messages" in metadata:
                 if metadata["copilotkit:emit-messages"] is False and is_message_event:
